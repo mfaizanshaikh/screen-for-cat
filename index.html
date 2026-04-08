@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Muffin Mode</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: #0a0a0a;
+    cursor: none;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #title {
+    position: fixed;
+    top: 12px;
+    left: 16px;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    color: rgba(255,255,255,0.18);
+    pointer-events: none;
+    z-index: 10;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="title">&#x1F431; Muffin Mode</div>
+<canvas id="c"></canvas>
+<script>
+(function() {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    canvas.width = window.innerWidth * devicePixelRatio;
+    canvas.height = window.innerHeight * devicePixelRatio;
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const W = () => window.innerWidth;
+  const H = () => window.innerHeight;
+
+  const PHASE_DURATION = 17000; // 17 seconds per phase
+  const TRANSITION_DURATION = 800;
+  let phaseStart = performance.now();
+  let currentPhase = 0;
+  const PHASE_COUNT = 4;
+
+  // ─── Utilities ───
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+
+  // ─── Phase 0: Laser Dot ───
+  const laser = {
+    x: 0, y: 0,
+    tx: 0, ty: 0,
+    vx: 0, vy: 0,
+    trail: [],
+    nextChange: 0,
+    speed: 3,
+    jitterAmp: 1.5,
+    init() {
+      this.x = W() / 2;
+      this.y = H() / 2;
+      this.pickTarget();
+      this.trail = [];
+    },
+    pickTarget() {
+      this.tx = rand(40, W() - 40);
+      this.ty = rand(40, H() - 40);
+      this.speed = rand(1.5, 8);
+      this.nextChange = performance.now() + rand(400, 2200);
+      this.jitterAmp = rand(0.5, 3);
+    },
+    update(dt) {
+      const now = performance.now();
+      if (now > this.nextChange) this.pickTarget();
+
+      // Sudden burst behavior
+      if (Math.random() < 0.008) {
+        this.tx = rand(30, W() - 30);
+        this.ty = rand(30, H() - 30);
+        this.speed = rand(6, 14);
+        this.nextChange = now + rand(200, 600);
+      }
+
+      // Zigzag / circle micro-patterns
+      const pattern = Math.sin(now * 0.003) * 0.5;
+      const dx = this.tx - this.x + Math.sin(now * 0.008) * 30 * pattern;
+      const dy = this.ty - this.y + Math.cos(now * 0.006) * 30 * pattern;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      const ease = Math.min(1, this.speed * dt / d);
+
+      this.x += dx * ease + (Math.random() - 0.5) * this.jitterAmp;
+      this.y += dy * ease + (Math.random() - 0.5) * this.jitterAmp;
+      this.x = clamp(this.x, 5, W() - 5);
+      this.y = clamp(this.y, 5, H() - 5);
+
+      this.trail.push({ x: this.x, y: this.y, t: now });
+      while (this.trail.length > 0 && now - this.trail[0].t > 600) this.trail.shift();
+    },
+    draw(alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      const now = performance.now();
+
+      // Trail
+      for (let i = 1; i < this.trail.length; i++) {
+        const p = this.trail[i];
+        const age = (now - p.t) / 600;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, lerp(3, 0.5, age), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,30,20,${(1 - age) * 0.25})`;
+        ctx.fill();
+      }
+
+      // Outer glow
+      const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, 28);
+      grad.addColorStop(0, 'rgba(255,60,40,0.5)');
+      grad.addColorStop(0.4, 'rgba(255,20,10,0.15)');
+      grad.addColorStop(1, 'rgba(255,0,0,0)');
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 28, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Inner dot
+      const r = 5 + Math.sin(now * 0.02) * 1.5;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff3322';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, r * 0.45, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffaaaa';
+      ctx.fill();
+
+      ctx.restore();
+    }
+  };
+
+  // ─── Phase 1: Dangling Rope / String ───
+  const rope = {
+    segments: [],
+    anchorX: 0, anchorY: 0,
+    anchorVX: 0,
+    segCount: 22,
+    segLen: 18,
+    swingPhase: 0,
+    jerkTimer: 0,
+    jerkVX: 0,
+    init() {
+      this.anchorX = W() / 2;
+      this.anchorY = -10;
+      this.anchorVX = 0;
+      this.jerkTimer = performance.now() + rand(1500, 4000);
+      this.segments = [];
+      for (let i = 0; i <= this.segCount; i++) {
+        this.segments.push({ x: this.anchorX, y: this.anchorY + i * this.segLen });
+      }
+    },
+    update(dt) {
+      const now = performance.now();
+
+      // Anchor sways
+      this.swingPhase += dt * rand(0.8, 1.2);
+      let swingSpeed = Math.sin(this.swingPhase * 0.7) * 2.5 + Math.sin(this.swingPhase * 1.9) * 1.2;
+
+      // Sudden jerk
+      if (now > this.jerkTimer) {
+        this.jerkVX = rand(-12, 12);
+        this.jerkTimer = now + rand(1200, 4000);
+      }
+      this.jerkVX *= 0.94;
+
+      this.anchorVX += swingSpeed * 0.08 + this.jerkVX * 0.1;
+      this.anchorVX *= 0.96;
+      this.anchorX += this.anchorVX;
+      this.anchorX = clamp(this.anchorX, 60, W() - 60);
+      this.anchorY = -10 + Math.sin(now * 0.002) * 15;
+
+      // Verlet-ish simulation
+      this.segments[0].x = this.anchorX;
+      this.segments[0].y = this.anchorY;
+      const gravity = 0.45;
+      for (let i = 1; i < this.segments.length; i++) {
+        const s = this.segments[i];
+        const prev = this.segments[i - 1];
+        s.y += gravity;
+        // Damping
+        const dx = s.x - prev.x;
+        const dy = s.y - prev.y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        const diff = (d - this.segLen) / d;
+        s.x -= dx * diff * 0.55;
+        s.y -= dy * diff * 0.55;
+      }
+
+      // Tip flick
+      const tip = this.segments[this.segments.length - 1];
+      if (Math.random() < 0.015) {
+        tip.x += rand(-25, 25);
+        tip.y += rand(-10, 5);
+      }
+    },
+    draw(alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+
+      // Draw rope with bezier curves for smoothness
+      ctx.beginPath();
+      ctx.moveTo(this.segments[0].x, this.segments[0].y);
+      for (let i = 1; i < this.segments.length - 1; i++) {
+        const xc = (this.segments[i].x + this.segments[i + 1].x) / 2;
+        const yc = (this.segments[i].y + this.segments[i + 1].y) / 2;
+        ctx.quadraticCurveTo(this.segments[i].x, this.segments[i].y, xc, yc);
+      }
+      const last = this.segments[this.segments.length - 1];
+      ctx.lineTo(last.x, last.y);
+      ctx.strokeStyle = '#e8d070';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // Thinner highlight
+      ctx.strokeStyle = 'rgba(255,240,180,0.4)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Tip tuft
+      ctx.beginPath();
+      ctx.arc(last.x, last.y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = '#f0c830';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(last.x, last.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff8e0';
+      ctx.fill();
+
+      ctx.restore();
+    }
+  };
+
+  // ─── Phase 2: Rolling Pencil ───
+  const pencil = {
+    x: 0, y: 0,
+    vx: 0, vy: 0,
+    angle: 0,
+    angVel: 0,
+    spinTimer: 0,
+    len: 120,
+    init() {
+      this.x = W() / 2;
+      this.y = H() / 2;
+      this.vx = rand(-3, 3);
+      this.vy = rand(-2, 2);
+      this.angle = rand(0, Math.PI * 2);
+      this.angVel = rand(-0.02, 0.02);
+      this.spinTimer = performance.now() + rand(2000, 5000);
+    },
+    update(dt) {
+      const now = performance.now();
+
+      // Occasional spin in place
+      if (now > this.spinTimer) {
+        this.angVel += rand(-0.15, 0.15);
+        this.vx += rand(-4, 4);
+        this.vy += rand(-3, 3);
+        this.spinTimer = now + rand(1500, 4500);
+      }
+
+      // Rolling physics
+      this.angVel *= 0.992;
+      this.angle += this.angVel;
+
+      // Gentle drift + friction
+      this.x += this.vx;
+      this.y += this.vy;
+      this.vx *= 0.995;
+      this.vy *= 0.995;
+
+      // Gravity-ish pull to keep it moving
+      if (Math.abs(this.vx) + Math.abs(this.vy) < 1) {
+        this.vx += rand(-2, 2);
+        this.vy += rand(-1.5, 1.5);
+      }
+
+      // Bounce off edges
+      const margin = 30;
+      if (this.x < margin) { this.x = margin; this.vx = Math.abs(this.vx) * 0.8; this.angVel += 0.04; }
+      if (this.x > W() - margin) { this.x = W() - margin; this.vx = -Math.abs(this.vx) * 0.8; this.angVel -= 0.04; }
+      if (this.y < margin) { this.y = margin; this.vy = Math.abs(this.vy) * 0.8; }
+      if (this.y > H() - margin) { this.y = H() - margin; this.vy = -Math.abs(this.vy) * 0.8; this.angVel += 0.02 * (this.vx > 0 ? 1 : -1); }
+
+      // Roll on ground
+      if (this.y > H() - 80) {
+        this.vy -= 0.15;
+        this.angVel = this.vx * 0.008;
+      }
+
+      // Random tumble
+      if (Math.random() < 0.005) {
+        this.angVel += rand(-0.2, 0.2);
+        this.vx += rand(-5, 5);
+        this.vy += rand(-5, -1);
+      }
+    },
+    draw(alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      const halfLen = this.len / 2;
+      const w = 10;
+
+      // Pencil body
+      ctx.beginPath();
+      ctx.rect(-halfLen, -w / 2, this.len * 0.75, w);
+      ctx.fillStyle = '#f5c842';
+      ctx.fill();
+      ctx.strokeStyle = '#c49a20';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Metal band
+      ctx.beginPath();
+      ctx.rect(-halfLen + this.len * 0.75, -w / 2, 12, w);
+      ctx.fillStyle = '#b0b0b0';
+      ctx.fill();
+      ctx.strokeStyle = '#888';
+      ctx.stroke();
+
+      // Eraser
+      ctx.beginPath();
+      ctx.rect(-halfLen + this.len * 0.75 + 12, -w / 2 + 1, 10, w - 2);
+      ctx.fillStyle = '#e8607a';
+      ctx.fill();
+
+      // Tip (triangle)
+      ctx.beginPath();
+      ctx.moveTo(-halfLen, -w / 2);
+      ctx.lineTo(-halfLen - 14, 0);
+      ctx.lineTo(-halfLen, w / 2);
+      ctx.closePath();
+      ctx.fillStyle = '#f5deb3';
+      ctx.fill();
+
+      // Graphite tip
+      ctx.beginPath();
+      ctx.moveTo(-halfLen - 14, 0);
+      ctx.lineTo(-halfLen - 8, -2);
+      ctx.lineTo(-halfLen - 8, 2);
+      ctx.closePath();
+      ctx.fillStyle = '#333';
+      ctx.fill();
+
+      // Stripe
+      ctx.beginPath();
+      ctx.rect(-halfLen, -w / 2, this.len * 0.75, 3);
+      ctx.fillStyle = 'rgba(0,0,0,0.08)';
+      ctx.fill();
+
+      ctx.restore();
+    }
+  };
+
+  // ─── Phase 3: Feather / Moth ───
+  const moth = {
+    x: 0, y: 0,
+    tx: 0, ty: 0,
+    vx: 0, vy: 0,
+    angle: 0,
+    wingPhase: 0,
+    wobble: 0,
+    nextTarget: 0,
+    init() {
+      this.x = W() / 2;
+      this.y = H() / 2;
+      this.pickTarget();
+      this.wingPhase = 0;
+      this.wobble = 0;
+    },
+    pickTarget() {
+      this.tx = rand(60, W() - 60);
+      this.ty = rand(60, H() - 60);
+      this.nextTarget = performance.now() + rand(800, 3000);
+    },
+    update(dt) {
+      const now = performance.now();
+      if (now > this.nextTarget) this.pickTarget();
+
+      // Sudden direction change
+      if (Math.random() < 0.012) {
+        this.tx = rand(40, W() - 40);
+        this.ty = rand(40, H() - 40);
+        this.nextTarget = now + rand(300, 1000);
+      }
+
+      const dx = this.tx - this.x;
+      const dy = this.ty - this.y;
+      const d = Math.max(1, Math.hypot(dx, dy));
+
+      // Erratic acceleration
+      const accel = rand(0.08, 0.25);
+      this.vx += (dx / d) * accel + (Math.random() - 0.5) * 0.8;
+      this.vy += (dy / d) * accel + (Math.random() - 0.5) * 0.8;
+
+      // Damping
+      this.vx *= 0.96;
+      this.vy *= 0.96;
+
+      this.x += this.vx;
+      this.y += this.vy;
+      this.x = clamp(this.x, 20, W() - 20);
+      this.y = clamp(this.y, 20, H() - 20);
+
+      // Face direction of movement
+      this.angle = Math.atan2(this.vy, this.vx);
+      this.wobble += dt * rand(4, 8);
+      this.wingPhase += dt * rand(12, 20);
+    },
+    draw(alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle + Math.sin(this.wobble) * 0.2);
+
+      const wingFlap = Math.sin(this.wingPhase) * 0.7;
+
+      // Left wing
+      ctx.save();
+      ctx.scale(1, wingFlap * 0.5 + 0.6);
+      ctx.beginPath();
+      ctx.ellipse(-4, -12, 16, 10, -0.4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(200,180,140,0.8)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(160,130,80,0.5)';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      // Wing pattern
+      ctx.beginPath();
+      ctx.arc(-6, -14, 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(90,60,30,0.35)';
+      ctx.fill();
+      ctx.restore();
+
+      // Right wing
+      ctx.save();
+      ctx.scale(1, -wingFlap * 0.5 - 0.6);
+      ctx.beginPath();
+      ctx.ellipse(-4, -12, 16, 10, -0.4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(210,190,150,0.8)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(160,130,80,0.5)';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(-6, -14, 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(90,60,30,0.3)';
+      ctx.fill();
+      ctx.restore();
+
+      // Body
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 12, 4, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#8b7355';
+      ctx.fill();
+
+      // Head
+      ctx.beginPath();
+      ctx.arc(10, 0, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#6b5335';
+      ctx.fill();
+
+      // Antennae
+      ctx.beginPath();
+      ctx.moveTo(12, -2);
+      ctx.quadraticCurveTo(18, -10 + Math.sin(this.wobble * 2) * 3, 20, -12);
+      ctx.moveTo(12, 2);
+      ctx.quadraticCurveTo(18, 10 + Math.sin(this.wobble * 2 + 1) * 3, 20, 12);
+      ctx.strokeStyle = '#6b5335';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Antenna tips
+      ctx.beginPath();
+      ctx.arc(20, -12, 1.5, 0, Math.PI * 2);
+      ctx.arc(20, 12, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#6b5335';
+      ctx.fill();
+
+      ctx.restore();
+    }
+  };
+
+  const phases = [laser, rope, pencil, moth];
+
+  // Init all phases
+  phases.forEach(p => p.init());
+
+  // ─── Main Loop ───
+  let lastTime = performance.now();
+
+  function frame(now) {
+    const dt = Math.min((now - lastTime) / 16.667, 3); // normalize to ~60fps
+    lastTime = now;
+
+    // Phase management
+    const elapsed = now - phaseStart;
+    if (elapsed > PHASE_DURATION) {
+      phaseStart = now;
+      currentPhase = (currentPhase + 1) % PHASE_COUNT;
+      phases[currentPhase].init();
+    }
+
+    // Clear
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, 0, W(), H());
+
+    // Compute transition alpha
+    let alpha = 1;
+    if (elapsed < TRANSITION_DURATION) {
+      alpha = elapsed / TRANSITION_DURATION;
+    } else if (elapsed > PHASE_DURATION - TRANSITION_DURATION) {
+      alpha = (PHASE_DURATION - elapsed) / TRANSITION_DURATION;
+    }
+
+    // Update & draw current phase
+    const phase = phases[currentPhase];
+    phase.update(dt);
+    phase.draw(clamp(alpha, 0, 1));
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
