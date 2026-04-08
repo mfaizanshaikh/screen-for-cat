@@ -76,14 +76,18 @@
   function lerp(a, b, t) { return a + (b - a) * t; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-  // ─── Web Audio: Cat-Attracting Sounds ───
+  // ─── Dot sizes (bigger for mobile) ───
+  const DOT_RADIUS = 18;
+  const GLOW_RADIUS = DOT_RADIUS * 3; // 54px
+
+  // ─── Web Audio: Cat-Attracting Sounds (5000-8000 Hz range) ───
   let audioCtx = null;
 
   function initAudio() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
 
-  // High-pitched chirp/click (bird-like prey sound)
+  // High-pitched chirp/click — played during burst movements
   function playChirp() {
     if (!audioCtx) return;
     const now = audioCtx.currentTime;
@@ -94,10 +98,10 @@
       const gain = audioCtx.createGain();
       const filter = audioCtx.createBiquadFilter();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(rand(3200, 5500), t);
-      osc.frequency.exponentialRampToValueAtTime(rand(1800, 3000), t + 0.03);
+      osc.frequency.setValueAtTime(rand(5000, 7500), t);
+      osc.frequency.exponentialRampToValueAtTime(rand(5500, 8000), t + 0.03);
       filter.type = 'bandpass';
-      filter.frequency.value = 4000;
+      filter.frequency.value = 6500;
       filter.Q.value = 8;
       gain.gain.setValueAtTime(0, t);
       gain.gain.linearRampToValueAtTime(rand(0.08, 0.18), t + 0.004);
@@ -110,19 +114,19 @@
     }
   }
 
-  // High-frequency squeak
+  // Louder squeak — played on sudden direction changes
   function playSqueak() {
     if (!audioCtx) return;
     const now = audioCtx.currentTime;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.type = 'sine';
-    const startFreq = rand(5000, 8000);
+    const startFreq = rand(6000, 8000);
     osc.frequency.setValueAtTime(startFreq, now);
-    osc.frequency.exponentialRampToValueAtTime(startFreq * rand(0.5, 0.8), now + 0.15);
+    osc.frequency.exponentialRampToValueAtTime(startFreq * rand(0.6, 0.85), now + 0.15);
     gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(rand(0.04, 0.1), now + 0.01);
-    gain.gain.setValueAtTime(rand(0.04, 0.1), now + 0.04);
+    gain.gain.linearRampToValueAtTime(rand(0.10, 0.20), now + 0.01);
+    gain.gain.setValueAtTime(rand(0.10, 0.20), now + 0.04);
     gain.gain.exponentialRampToValueAtTime(0.001, now + rand(0.08, 0.18));
     osc.connect(gain);
     gain.connect(audioCtx.destination);
@@ -130,11 +134,11 @@
     osc.stop(now + 0.25);
   }
 
-  // Scratching/rustling noise (played when laser moves fast)
-  let scratchNode = null;
-  let scratchGain = null;
+  // Soft rustling noise — plays during slow stalk mode
+  let rustleNode = null;
+  let rustleGain = null;
 
-  function initScratchNoise() {
+  function initRustleNoise() {
     if (!audioCtx) return;
     const bufferSize = audioCtx.sampleRate * 2;
     const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
@@ -142,156 +146,387 @@
     for (let i = 0; i < bufferSize; i++) {
       data[i] = (Math.random() * 2 - 1);
     }
-    scratchNode = audioCtx.createBufferSource();
-    scratchNode.buffer = buffer;
-    scratchNode.loop = true;
+    rustleNode = audioCtx.createBufferSource();
+    rustleNode.buffer = buffer;
+    rustleNode.loop = true;
 
     const filter = audioCtx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.value = 6000;
-    filter.Q.value = 2.5;
+    filter.frequency.value = 6500;
+    filter.Q.value = 3;
 
     const filter2 = audioCtx.createBiquadFilter();
     filter2.type = 'highpass';
-    filter2.frequency.value = 3000;
+    filter2.frequency.value = 5000;
 
-    scratchGain = audioCtx.createGain();
-    scratchGain.gain.value = 0;
+    rustleGain = audioCtx.createGain();
+    rustleGain.gain.value = 0;
 
-    scratchNode.connect(filter);
+    rustleNode.connect(filter);
     filter.connect(filter2);
-    filter2.connect(scratchGain);
-    scratchGain.connect(audioCtx.destination);
-    scratchNode.start();
+    filter2.connect(rustleGain);
+    rustleGain.connect(audioCtx.destination);
+    rustleNode.start();
   }
 
-  function updateScratchVolume(speed) {
-    if (!scratchGain) return;
-    // Map speed to volume: fast movement = louder scratching
-    const vol = clamp((speed - 4) / 12, 0, 1) * 0.06;
-    scratchGain.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
+  function setRustleVolume(vol) {
+    if (!rustleGain || !audioCtx) return;
+    rustleGain.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.08);
   }
 
-  // Schedule intermittent chirps and squeaks
-  let nextChirp = 0;
-  let nextSqueak = 0;
+  // ─── Movement State Machine ───
+  const STATE_STALK = 'stalk';
+  const STATE_BURST = 'burst';
+  const STATE_FREEZE = 'freeze';
+  const STATE_CORNER_CREEP = 'corner_creep';
+  const STATE_CORNER_PAUSE = 'corner_pause';
+  const STATE_CORNER_DART = 'corner_dart';
 
-  function scheduleSounds(now) {
-    if (now > nextChirp) {
-      playChirp();
-      nextChirp = now + rand(2000, 5000);
-    }
-    if (now > nextSqueak) {
-      playSqueak();
-      nextSqueak = now + rand(4000, 9000);
-    }
-  }
-
-  // ─── Laser Dot ───
+  // ─── Primary Laser Dot ───
   const laser = {
     x: 0, y: 0,
     tx: 0, ty: 0,
     prevX: 0, prevY: 0,
+    prevDx: 0, prevDy: 0,
     trail: [],
-    nextChange: 0,
-    speed: 3,
-    jitterAmp: 1.5,
+    state: STATE_STALK,
+    stateEnd: 0,
+    stalkWobblePhase: 0,
+    nextCornerTime: 0,
+    cornerTarget: null,
+    burstChirpTimer: 0,
+
     init() {
       this.x = W() / 2;
       this.y = H() / 2;
       this.prevX = this.x;
       this.prevY = this.y;
-      this.pickTarget();
+      this.prevDx = 0;
+      this.prevDy = 0;
       this.trail = [];
+      this.state = STATE_STALK;
+      this.pickStalkTarget();
+      this.stateEnd = performance.now() + rand(2000, 5000);
+      this.nextCornerTime = performance.now() + rand(20000, 30000);
+      this.burstChirpTimer = 0;
     },
-    pickTarget() {
+
+    pickStalkTarget() {
+      this.tx = rand(60, W() - 60);
+      this.ty = rand(60, H() - 60);
+    },
+
+    pickBurstTarget() {
       this.tx = rand(40, W() - 40);
       this.ty = rand(40, H() - 40);
-      this.speed = rand(1.5, 8);
-      this.nextChange = performance.now() + rand(400, 2200);
-      this.jitterAmp = rand(0.5, 3);
     },
+
+    pickCornerTarget() {
+      const corners = [
+        { x: rand(10, 40), y: rand(10, 40) },
+        { x: rand(W() - 40, W() - 10), y: rand(10, 40) },
+        { x: rand(10, 40), y: rand(H() - 40, H() - 10) },
+        { x: rand(W() - 40, W() - 10), y: rand(H() - 40, H() - 10) },
+        // Edge midpoints
+        { x: rand(W() * 0.3, W() * 0.7), y: rand(5, 15) },
+        { x: rand(W() * 0.3, W() * 0.7), y: rand(H() - 15, H() - 5) },
+        { x: rand(5, 15), y: rand(H() * 0.3, H() * 0.7) },
+        { x: rand(W() - 15, W() - 5), y: rand(H() * 0.3, H() * 0.7) },
+      ];
+      this.cornerTarget = corners[Math.floor(Math.random() * corners.length)];
+      this.tx = this.cornerTarget.x;
+      this.ty = this.cornerTarget.y;
+    },
+
+    transitionState(now) {
+      // Check for corner hiding behavior (every 20-30s)
+      if (now > this.nextCornerTime && this.state !== STATE_CORNER_CREEP &&
+          this.state !== STATE_CORNER_PAUSE && this.state !== STATE_CORNER_DART) {
+        this.state = STATE_CORNER_CREEP;
+        this.pickCornerTarget();
+        this.stateEnd = now + rand(3000, 5000); // Time to creep to corner
+        this.nextCornerTime = now + rand(20000, 30000);
+        return;
+      }
+
+      switch (this.state) {
+        case STATE_STALK:
+          // 20% chance freeze before burst, 80% go to burst
+          if (Math.random() < 0.20) {
+            this.state = STATE_FREEZE;
+            this.stateEnd = now + rand(400, 600);
+          } else {
+            this.state = STATE_BURST;
+            this.pickBurstTarget();
+            this.stateEnd = now + rand(500, 1000);
+            this.burstChirpTimer = 0;
+            playChirp();
+          }
+          break;
+
+        case STATE_BURST:
+          this.state = STATE_STALK;
+          this.pickStalkTarget();
+          this.stateEnd = now + rand(2500, 6000); // 70% time in stalk
+          break;
+
+        case STATE_FREEZE:
+          // After freeze, always burst (the freeze→dart behavior)
+          this.state = STATE_BURST;
+          this.pickBurstTarget();
+          this.stateEnd = now + rand(500, 1000);
+          this.burstChirpTimer = 0;
+          playChirp();
+          playSqueak(); // Squeak on sudden movement after freeze
+          break;
+
+        case STATE_CORNER_CREEP:
+          // Arrived near corner — pause
+          this.state = STATE_CORNER_PAUSE;
+          this.stateEnd = now + rand(1000, 2000);
+          break;
+
+        case STATE_CORNER_PAUSE:
+          // Dart out toward center
+          this.state = STATE_CORNER_DART;
+          this.tx = rand(W() * 0.3, W() * 0.7);
+          this.ty = rand(H() * 0.3, H() * 0.7);
+          this.stateEnd = now + rand(400, 800);
+          playSqueak();
+          playChirp();
+          break;
+
+        case STATE_CORNER_DART:
+          // Back to stalk
+          this.state = STATE_STALK;
+          this.pickStalkTarget();
+          this.stateEnd = now + rand(2500, 5000);
+          break;
+      }
+    },
+
     update(dt) {
       const now = performance.now();
       this.prevX = this.x;
       this.prevY = this.y;
 
-      if (now > this.nextChange) this.pickTarget();
+      if (now > this.stateEnd) this.transitionState(now);
 
-      // Sudden burst behavior
-      if (Math.random() < 0.008) {
-        this.tx = rand(30, W() - 30);
-        this.ty = rand(30, H() - 30);
-        this.speed = rand(6, 14);
-        this.nextChange = now + rand(200, 600);
+      let speed, jitter;
+      switch (this.state) {
+        case STATE_STALK:
+        case STATE_CORNER_CREEP: {
+          // Slow creeping 1-2px per frame with slight wobble
+          speed = rand(1.0, 2.0);
+          jitter = 0.8;
+          this.stalkWobblePhase += dt * 0.08;
+          const wobbleX = Math.sin(this.stalkWobblePhase * 2.3) * 1.5;
+          const wobbleY = Math.cos(this.stalkWobblePhase * 1.7) * 1.5;
+          const sdx = this.tx - this.x + wobbleX;
+          const sdy = this.ty - this.y + wobbleY;
+          const sd = Math.max(1, Math.hypot(sdx, sdy));
+          const sease = Math.min(1, speed * dt / sd);
+          this.x += sdx * sease + (Math.random() - 0.5) * jitter;
+          this.y += sdy * sease + (Math.random() - 0.5) * jitter;
+
+          // Soft rustle during stalk
+          setRustleVolume(0.025);
+          break;
+        }
+
+        case STATE_BURST:
+        case STATE_CORNER_DART: {
+          // Fast dart across screen
+          speed = rand(10, 18);
+          jitter = 2.5;
+          const bdx = this.tx - this.x;
+          const bdy = this.ty - this.y;
+          const bd = Math.max(1, Math.hypot(bdx, bdy));
+          const bease = Math.min(1, speed * dt / bd);
+          this.x += bdx * bease + (Math.random() - 0.5) * jitter;
+          this.y += bdy * bease + (Math.random() - 0.5) * jitter;
+
+          // Chirp sounds during burst
+          this.burstChirpTimer += dt * 16.667;
+          if (this.burstChirpTimer > rand(150, 300)) {
+            playChirp();
+            this.burstChirpTimer = 0;
+          }
+
+          // No rustle during burst
+          setRustleVolume(0);
+          break;
+        }
+
+        case STATE_FREEZE:
+          // Completely still
+          setRustleVolume(0);
+          break;
+
+        case STATE_CORNER_PAUSE:
+          // Tiny trembles while hiding
+          this.x += (Math.random() - 0.5) * 0.3;
+          this.y += (Math.random() - 0.5) * 0.3;
+          setRustleVolume(0.01);
+          break;
       }
 
-      // Zigzag / circle micro-patterns
-      const pattern = Math.sin(now * 0.003) * 0.5;
-      const dx = this.tx - this.x + Math.sin(now * 0.008) * 30 * pattern;
-      const dy = this.ty - this.y + Math.cos(now * 0.006) * 30 * pattern;
-      const d = Math.max(1, Math.hypot(dx, dy));
-      const ease = Math.min(1, this.speed * dt / d);
+      this.x = clamp(this.x, 3, W() - 3);
+      this.y = clamp(this.y, 3, H() - 3);
 
-      this.x += dx * ease + (Math.random() - 0.5) * this.jitterAmp;
-      this.y += dy * ease + (Math.random() - 0.5) * this.jitterAmp;
-      this.x = clamp(this.x, 5, W() - 5);
-      this.y = clamp(this.y, 5, H() - 5);
+      // Detect sudden direction change → squeak
+      const curDx = this.x - this.prevX;
+      const curDy = this.y - this.prevY;
+      if (this.prevDx !== 0 || this.prevDy !== 0) {
+        const dot = curDx * this.prevDx + curDy * this.prevDy;
+        const mag = Math.hypot(curDx, curDy) * Math.hypot(this.prevDx, this.prevDy);
+        if (mag > 2 && dot / mag < -0.3) {
+          playSqueak();
+        }
+      }
+      this.prevDx = curDx;
+      this.prevDy = curDy;
+
+      // Trail
+      this.trail.push({ x: this.x, y: this.y, t: now });
+      while (this.trail.length > 0 && now - this.trail[0].t > 600) this.trail.shift();
+    },
+
+    draw() {
+      drawDot(this.x, this.y, this.trail, 1.0);
+    }
+  };
+
+  // ─── Second Dot (occasional) ───
+  const secondDot = {
+    active: false,
+    x: 0, y: 0,
+    tx: 0, ty: 0,
+    trail: [],
+    opacity: 0,
+    spawnTime: 0,
+    duration: 0,
+    nextSpawn: 0,
+
+    init() {
+      this.active = false;
+      this.trail = [];
+      this.nextSpawn = performance.now() + rand(30000, 45000);
+    },
+
+    spawn(now) {
+      this.active = true;
+      // Spawn near primary dot but offset
+      this.x = clamp(laser.x + rand(-100, 100), 30, W() - 30);
+      this.y = clamp(laser.y + rand(-100, 100), 30, H() - 30);
+      this.pickTarget();
+      this.trail = [];
+      this.opacity = 0;
+      this.spawnTime = now;
+      this.duration = rand(3000, 5000);
+      this.nextSpawn = now + rand(30000, 45000);
+    },
+
+    pickTarget() {
+      this.tx = rand(60, W() - 60);
+      this.ty = rand(60, H() - 60);
+    },
+
+    update(dt) {
+      const now = performance.now();
+
+      if (!this.active) {
+        if (now > this.nextSpawn) this.spawn(now);
+        return;
+      }
+
+      const elapsed = now - this.spawnTime;
+
+      // Fade in over 300ms, fade out over last 800ms
+      if (elapsed < 300) {
+        this.opacity = elapsed / 300;
+      } else if (elapsed > this.duration - 800) {
+        this.opacity = Math.max(0, (this.duration - elapsed) / 800);
+      } else {
+        this.opacity = 1;
+      }
+
+      if (elapsed > this.duration) {
+        this.active = false;
+        this.trail = [];
+        return;
+      }
+
+      // Independent movement — mix of stalk and occasional dart
+      if (Math.random() < 0.015) {
+        this.pickTarget();
+      }
+
+      const speed = rand(2, 6);
+      const dx = this.tx - this.x + Math.sin(now * 0.005) * 15;
+      const dy = this.ty - this.y + Math.cos(now * 0.004) * 15;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      const ease = Math.min(1, speed * dt / d);
+      this.x += dx * ease + (Math.random() - 0.5) * 1.2;
+      this.y += dy * ease + (Math.random() - 0.5) * 1.2;
+      this.x = clamp(this.x, 3, W() - 3);
+      this.y = clamp(this.y, 3, H() - 3);
 
       this.trail.push({ x: this.x, y: this.y, t: now });
       while (this.trail.length > 0 && now - this.trail[0].t > 600) this.trail.shift();
-
-      // Compute instantaneous speed for scratch sound
-      const moveSpeed = Math.hypot(this.x - this.prevX, this.y - this.prevY) / Math.max(dt, 0.1);
-      updateScratchVolume(moveSpeed);
-
-      // Schedule chirps/squeaks
-      scheduleSounds(now);
     },
+
     draw() {
-      const now = performance.now();
-
-      // Trail
-      for (let i = 1; i < this.trail.length; i++) {
-        const p = this.trail[i];
-        const age = (now - p.t) / 600;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, lerp(3, 0.5, age), 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,30,20,${(1 - age) * 0.25})`;
-        ctx.fill();
-      }
-
-      // Outer glow
-      const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, 28);
-      grad.addColorStop(0, 'rgba(255,60,40,0.5)');
-      grad.addColorStop(0.4, 'rgba(255,20,10,0.15)');
-      grad.addColorStop(1, 'rgba(255,0,0,0)');
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, 28, 0, Math.PI * 2);
-      ctx.fillStyle = grad;
-      ctx.fill();
-
-      // Inner dot
-      const r = 5 + Math.sin(now * 0.02) * 1.5;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = '#ff3322';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, r * 0.45, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffaaaa';
-      ctx.fill();
+      if (!this.active || this.opacity <= 0) return;
+      drawDot(this.x, this.y, this.trail, this.opacity);
     }
   };
+
+  // ─── Shared dot drawing (18px radius, 54px glow) ───
+  function drawDot(x, y, trail, opacity) {
+    const now = performance.now();
+
+    // Trail
+    for (let i = 1; i < trail.length; i++) {
+      const p = trail[i];
+      const age = (now - p.t) / 600;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, lerp(DOT_RADIUS * 0.4, 1, age), 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,30,20,${(1 - age) * 0.25 * opacity})`;
+      ctx.fill();
+    }
+
+    // Outer glow (3x dot size = 54px)
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, GLOW_RADIUS);
+    grad.addColorStop(0, `rgba(255,60,40,${0.5 * opacity})`);
+    grad.addColorStop(0.33, `rgba(255,20,10,${0.15 * opacity})`);
+    grad.addColorStop(1, 'rgba(255,0,0,0)');
+    ctx.beginPath();
+    ctx.arc(x, y, GLOW_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Inner dot (18px radius with pulse)
+    const r = DOT_RADIUS + Math.sin(now * 0.02) * 2;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,51,34,${opacity})`;
+    ctx.fill();
+
+    // Bright center
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.45, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,170,170,${opacity})`;
+    ctx.fill();
+  }
 
   // ─── Start everything on tap/click ───
   function startApp() {
     overlay.style.display = 'none';
     initAudio();
-    initScratchNoise();
-    nextChirp = performance.now() + rand(500, 2000);
-    nextSqueak = performance.now() + rand(3000, 6000);
+    initRustleNoise();
     laser.init();
+    secondDot.init();
     requestAnimationFrame(frame);
   }
 
@@ -312,7 +547,10 @@
     ctx.fillRect(0, 0, W(), H());
 
     laser.update(dt);
+    secondDot.update(dt);
+
     laser.draw();
+    secondDot.draw();
 
     requestAnimationFrame(frame);
   }
