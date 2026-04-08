@@ -78,7 +78,11 @@
 
   // ─── Dot sizes (bigger for mobile) ───
   const DOT_RADIUS = 18;
-  const GLOW_RADIUS = DOT_RADIUS * 3; // 54px
+  const GLOW_MIN = 40;
+  const GLOW_MAX = 70;
+
+  // ─── Edge bounce margin ───
+  const EDGE_MARGIN = 8;
 
   // ─── Web Audio: Cat-Attracting Sounds (5000-8000 Hz range) ───
   let audioCtx = null;
@@ -134,6 +138,48 @@
     osc.stop(now + 0.25);
   }
 
+  // "Caught" reward: descending sequence of 5 high-pitched squeaks (8000→3000 Hz)
+  function playDeathSound() {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    for (let i = 0; i < 5; i++) {
+      const t = now + i * 0.09;
+      const freq = 8000 - i * 1000; // 8000, 7000, 6000, 5000, 4000→3000
+      const endFreq = freq - 1000;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(endFreq, 3000), t + 0.07);
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.2, t + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.1);
+    }
+  }
+
+  // Sharp high-pitched burst — played when dot flees from touch
+  function playFleeSound() {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(7000, now);
+    osc.frequency.exponentialRampToValueAtTime(9000, now + 0.03);
+    osc.frequency.exponentialRampToValueAtTime(5000, now + 0.1);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.15, now + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }
+
   // Soft rustling noise — plays during slow stalk mode
   let rustleNode = null;
   let rustleGain = null;
@@ -181,6 +227,10 @@
   const STATE_CORNER_CREEP = 'corner_creep';
   const STATE_CORNER_PAUSE = 'corner_pause';
   const STATE_CORNER_DART = 'corner_dart';
+  const STATE_DYING = 'dying';
+  const STATE_DEAD = 'dead';
+  const STATE_RESPAWNING = 'respawning';
+  const STATE_FLEEING = 'fleeing';
 
   // ─── Primary Laser Dot ───
   const laser = {
@@ -195,6 +245,16 @@
     nextCornerTime: 0,
     cornerTarget: null,
     burstChirpTimer: 0,
+    // Death animation state
+    nextDeathTime: 0,
+    deathStartTime: 0,
+    deathScale: 1,       // 1 = full size, 0 = dead
+    deadDuration: 800,    // ms to stay dead before respawn
+    dyingDuration: 1500,  // ms of wobble + shrink
+    respawnScale: 0,      // for pop-in effect
+    // Flee state
+    fleeVx: 0,
+    fleeVy: 0,
 
     init() {
       this.x = W() / 2;
@@ -205,9 +265,12 @@
       this.prevDy = 0;
       this.trail = [];
       this.state = STATE_STALK;
+      this.deathScale = 1;
+      this.respawnScale = 1;
       this.pickStalkTarget();
       this.stateEnd = performance.now() + rand(2000, 5000);
       this.nextCornerTime = performance.now() + rand(20000, 30000);
+      this.nextDeathTime = performance.now() + rand(45000, 60000);
       this.burstChirpTimer = 0;
     },
 
@@ -238,20 +301,47 @@
       this.ty = this.cornerTarget.y;
     },
 
+    // Flee away from a touch point
+    fleeFrom(touchX, touchY) {
+      if (this.state === STATE_DYING || this.state === STATE_DEAD || this.state === STATE_RESPAWNING) return;
+      const dx = this.x - touchX;
+      const dy = this.y - touchY;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      // Flee in opposite direction at max speed
+      const fleeSpeed = 25;
+      this.fleeVx = (dx / d) * fleeSpeed;
+      this.fleeVy = (dy / d) * fleeSpeed;
+      this.state = STATE_FLEEING;
+      this.stateEnd = performance.now() + rand(300, 600);
+      playFleeSound();
+    },
+
     transitionState(now) {
+      // Check for death animation
+      if (now > this.nextDeathTime && this.state !== STATE_DYING &&
+          this.state !== STATE_DEAD && this.state !== STATE_RESPAWNING &&
+          this.state !== STATE_FLEEING) {
+        this.state = STATE_DYING;
+        this.deathStartTime = now;
+        this.stateEnd = now + this.dyingDuration;
+        this.nextDeathTime = now + rand(45000, 60000);
+        return;
+      }
+
       // Check for corner hiding behavior (every 20-30s)
       if (now > this.nextCornerTime && this.state !== STATE_CORNER_CREEP &&
-          this.state !== STATE_CORNER_PAUSE && this.state !== STATE_CORNER_DART) {
+          this.state !== STATE_CORNER_PAUSE && this.state !== STATE_CORNER_DART &&
+          this.state !== STATE_DYING && this.state !== STATE_DEAD &&
+          this.state !== STATE_RESPAWNING && this.state !== STATE_FLEEING) {
         this.state = STATE_CORNER_CREEP;
         this.pickCornerTarget();
-        this.stateEnd = now + rand(3000, 5000); // Time to creep to corner
+        this.stateEnd = now + rand(3000, 5000);
         this.nextCornerTime = now + rand(20000, 30000);
         return;
       }
 
       switch (this.state) {
         case STATE_STALK:
-          // 20% chance freeze before burst, 80% go to burst
           if (Math.random() < 0.20) {
             this.state = STATE_FREEZE;
             this.stateEnd = now + rand(400, 600);
@@ -267,27 +357,24 @@
         case STATE_BURST:
           this.state = STATE_STALK;
           this.pickStalkTarget();
-          this.stateEnd = now + rand(2500, 6000); // 70% time in stalk
+          this.stateEnd = now + rand(2500, 6000);
           break;
 
         case STATE_FREEZE:
-          // After freeze, always burst (the freeze→dart behavior)
           this.state = STATE_BURST;
           this.pickBurstTarget();
           this.stateEnd = now + rand(500, 1000);
           this.burstChirpTimer = 0;
           playChirp();
-          playSqueak(); // Squeak on sudden movement after freeze
+          playSqueak();
           break;
 
         case STATE_CORNER_CREEP:
-          // Arrived near corner — pause
           this.state = STATE_CORNER_PAUSE;
           this.stateEnd = now + rand(1000, 2000);
           break;
 
         case STATE_CORNER_PAUSE:
-          // Dart out toward center
           this.state = STATE_CORNER_DART;
           this.tx = rand(W() * 0.3, W() * 0.7);
           this.ty = rand(H() * 0.3, H() * 0.7);
@@ -297,10 +384,45 @@
           break;
 
         case STATE_CORNER_DART:
-          // Back to stalk
           this.state = STATE_STALK;
           this.pickStalkTarget();
           this.stateEnd = now + rand(2500, 5000);
+          break;
+
+        case STATE_DYING:
+          // Dot has finished dying — go to dead state
+          this.state = STATE_DEAD;
+          this.deathScale = 0;
+          playDeathSound();
+          this.stateEnd = now + this.deadDuration;
+          break;
+
+        case STATE_DEAD:
+          // Respawn at random position
+          this.state = STATE_RESPAWNING;
+          this.x = rand(80, W() - 80);
+          this.y = rand(80, H() - 80);
+          this.respawnScale = 0;
+          this.trail = [];
+          this.stateEnd = now + 300; // pop-in duration
+          break;
+
+        case STATE_RESPAWNING:
+          // Done respawning, back to stalk
+          this.deathScale = 1;
+          this.respawnScale = 1;
+          this.state = STATE_STALK;
+          this.pickStalkTarget();
+          this.stateEnd = now + rand(2500, 5000);
+          break;
+
+        case STATE_FLEEING:
+          // Done fleeing, back to stalk/burst
+          this.state = STATE_BURST;
+          this.pickBurstTarget();
+          this.stateEnd = now + rand(500, 1000);
+          this.burstChirpTimer = 0;
+          playChirp();
           break;
       }
     },
@@ -316,7 +438,6 @@
       switch (this.state) {
         case STATE_STALK:
         case STATE_CORNER_CREEP: {
-          // Slow creeping 1-2px per frame with slight wobble
           speed = rand(1.0, 2.0);
           jitter = 0.8;
           this.stalkWobblePhase += dt * 0.08;
@@ -328,15 +449,12 @@
           const sease = Math.min(1, speed * dt / sd);
           this.x += sdx * sease + (Math.random() - 0.5) * jitter;
           this.y += sdy * sease + (Math.random() - 0.5) * jitter;
-
-          // Soft rustle during stalk
           setRustleVolume(0.025);
           break;
         }
 
         case STATE_BURST:
         case STATE_CORNER_DART: {
-          // Fast dart across screen
           speed = rand(10, 18);
           jitter = 2.5;
           const bdx = this.tx - this.x;
@@ -345,34 +463,112 @@
           const bease = Math.min(1, speed * dt / bd);
           this.x += bdx * bease + (Math.random() - 0.5) * jitter;
           this.y += bdy * bease + (Math.random() - 0.5) * jitter;
-
-          // Chirp sounds during burst
           this.burstChirpTimer += dt * 16.667;
           if (this.burstChirpTimer > rand(150, 300)) {
             playChirp();
             this.burstChirpTimer = 0;
           }
-
-          // No rustle during burst
           setRustleVolume(0);
           break;
         }
 
         case STATE_FREEZE:
-          // Completely still
           setRustleVolume(0);
           break;
 
         case STATE_CORNER_PAUSE:
-          // Tiny trembles while hiding
           this.x += (Math.random() - 0.5) * 0.3;
           this.y += (Math.random() - 0.5) * 0.3;
           setRustleVolume(0.01);
           break;
+
+        case STATE_DYING: {
+          // Wobble frantically, increasing in intensity, then shrink
+          const elapsed = now - this.deathStartTime;
+          const progress = elapsed / this.dyingDuration; // 0→1
+          // Wobble intensity increases over time
+          const wobbleIntensity = 3 + progress * 12;
+          this.x += (Math.random() - 0.5) * wobbleIntensity;
+          this.y += (Math.random() - 0.5) * wobbleIntensity;
+          // Shrink from 1 to 0 in last 40% of dying duration
+          if (progress > 0.6) {
+            this.deathScale = Math.max(0, 1 - (progress - 0.6) / 0.4);
+          } else {
+            this.deathScale = 1;
+          }
+          setRustleVolume(0);
+          break;
+        }
+
+        case STATE_DEAD:
+          // Invisible, no movement
+          this.deathScale = 0;
+          setRustleVolume(0);
+          break;
+
+        case STATE_RESPAWNING: {
+          // Pop-in: scale from 0 to 1
+          const rElapsed = now - (this.stateEnd - 300);
+          this.respawnScale = clamp(rElapsed / 300, 0, 1);
+          // Overshoot bounce effect
+          this.deathScale = this.respawnScale < 1
+            ? this.respawnScale * (1 + 0.3 * Math.sin(this.respawnScale * Math.PI))
+            : 1;
+          setRustleVolume(0);
+          break;
+        }
+
+        case STATE_FLEEING: {
+          // Move at max speed away from touch
+          this.x += this.fleeVx * dt;
+          this.y += this.fleeVy * dt;
+          // Decelerate slightly
+          this.fleeVx *= 0.96;
+          this.fleeVy *= 0.96;
+          setRustleVolume(0);
+          break;
+        }
       }
 
-      this.x = clamp(this.x, 3, W() - 3);
-      this.y = clamp(this.y, 3, H() - 3);
+      // ─── Constant micro-jitter (±2px every frame, simulates hand tremor) ───
+      if (this.state !== STATE_DEAD && this.state !== STATE_RESPAWNING) {
+        this.x += (Math.random() - 0.5) * 4; // ±2px
+        this.y += (Math.random() - 0.5) * 4;
+      }
+
+      // ─── Edge bounce ───
+      if (this.state !== STATE_DEAD && this.state !== STATE_RESPAWNING) {
+        let bounced = false;
+        if (this.x < EDGE_MARGIN) {
+          this.x = EDGE_MARGIN;
+          if (this.state === STATE_FLEEING) this.fleeVx = Math.abs(this.fleeVx);
+          this.tx = rand(W() * 0.3, W() * 0.7);
+          bounced = true;
+        } else if (this.x > W() - EDGE_MARGIN) {
+          this.x = W() - EDGE_MARGIN;
+          if (this.state === STATE_FLEEING) this.fleeVx = -Math.abs(this.fleeVx);
+          this.tx = rand(W() * 0.3, W() * 0.7);
+          bounced = true;
+        }
+        if (this.y < EDGE_MARGIN) {
+          this.y = EDGE_MARGIN;
+          if (this.state === STATE_FLEEING) this.fleeVy = Math.abs(this.fleeVy);
+          this.ty = rand(H() * 0.3, H() * 0.7);
+          bounced = true;
+        } else if (this.y > H() - EDGE_MARGIN) {
+          this.y = H() - EDGE_MARGIN;
+          if (this.state === STATE_FLEEING) this.fleeVy = -Math.abs(this.fleeVy);
+          this.ty = rand(H() * 0.3, H() * 0.7);
+          bounced = true;
+        }
+        // Brief speed burst on bounce
+        if (bounced && this.state !== STATE_DYING && this.state !== STATE_FLEEING) {
+          this.state = STATE_BURST;
+          this.stateEnd = performance.now() + rand(300, 500);
+          this.burstChirpTimer = 0;
+          playSqueak();
+        }
+      }
 
       // Detect sudden direction change → squeak
       const curDx = this.x - this.prevX;
@@ -388,12 +584,15 @@
       this.prevDy = curDy;
 
       // Trail
-      this.trail.push({ x: this.x, y: this.y, t: now });
+      if (this.state !== STATE_DEAD) {
+        this.trail.push({ x: this.x, y: this.y, t: now });
+      }
       while (this.trail.length > 0 && now - this.trail[0].t > 600) this.trail.shift();
     },
 
     draw() {
-      drawDot(this.x, this.y, this.trail, 1.0);
+      if (this.state === STATE_DEAD) return;
+      drawDot(this.x, this.y, this.trail, 1.0, this.deathScale);
     }
   };
 
@@ -416,7 +615,6 @@
 
     spawn(now) {
       this.active = true;
-      // Spawn near primary dot but offset
       this.x = clamp(laser.x + rand(-100, 100), 30, W() - 30);
       this.y = clamp(laser.y + rand(-100, 100), 30, H() - 30);
       this.pickTarget();
@@ -442,7 +640,6 @@
 
       const elapsed = now - this.spawnTime;
 
-      // Fade in over 300ms, fade out over last 800ms
       if (elapsed < 300) {
         this.opacity = elapsed / 300;
       } else if (elapsed > this.duration - 800) {
@@ -457,7 +654,6 @@
         return;
       }
 
-      // Independent movement — mix of stalk and occasional dart
       if (Math.random() < 0.015) {
         this.pickTarget();
       }
@@ -469,6 +665,11 @@
       const ease = Math.min(1, speed * dt / d);
       this.x += dx * ease + (Math.random() - 0.5) * 1.2;
       this.y += dy * ease + (Math.random() - 0.5) * 1.2;
+
+      // Micro-jitter for second dot too
+      this.x += (Math.random() - 0.5) * 4;
+      this.y += (Math.random() - 0.5) * 4;
+
       this.x = clamp(this.x, 3, W() - 3);
       this.y = clamp(this.y, 3, H() - 3);
 
@@ -478,51 +679,80 @@
 
     draw() {
       if (!this.active || this.opacity <= 0) return;
-      drawDot(this.x, this.y, this.trail, this.opacity);
+      drawDot(this.x, this.y, this.trail, this.opacity, 1);
     }
   };
 
-  // ─── Shared dot drawing (18px radius, 54px glow) ───
-  function drawDot(x, y, trail, opacity) {
+  // ─── Shared dot drawing with pulsing glow and death scale ───
+  function drawDot(x, y, trail, opacity, scale) {
+    if (scale <= 0) return;
     const now = performance.now();
+
+    // Flicker during death (rapid opacity oscillation when scale < 0.5)
+    let flickerOpacity = opacity;
+    if (scale < 0.5 && scale > 0) {
+      flickerOpacity *= (Math.sin(now * 0.08) > 0) ? 1 : 0.2;
+    }
 
     // Trail
     for (let i = 1; i < trail.length; i++) {
       const p = trail[i];
       const age = (now - p.t) / 600;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, lerp(DOT_RADIUS * 0.4, 1, age), 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(255,30,20,${(1 - age) * 0.25 * opacity})`;
+      ctx.arc(p.x, p.y, lerp(DOT_RADIUS * 0.4, 1, age) * scale, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,30,20,${(1 - age) * 0.25 * flickerOpacity})`;
       ctx.fill();
     }
 
-    // Outer glow (3x dot size = 54px)
-    const grad = ctx.createRadialGradient(x, y, 0, x, y, GLOW_RADIUS);
-    grad.addColorStop(0, `rgba(255,60,40,${0.5 * opacity})`);
-    grad.addColorStop(0.33, `rgba(255,20,10,${0.15 * opacity})`);
+    // ─── Pulsing glow: sine wave between GLOW_MIN and GLOW_MAX at ~2.5 cycles/sec ───
+    const glowPulse = Math.sin(now * 0.016) * 0.5 + 0.5; // 0→1 at ~2.5Hz (0.016 rad/ms ≈ 2.55 Hz)
+    const currentGlow = lerp(GLOW_MIN, GLOW_MAX, glowPulse) * scale;
+
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, currentGlow);
+    grad.addColorStop(0, `rgba(255,60,40,${0.5 * flickerOpacity})`);
+    grad.addColorStop(0.33, `rgba(255,20,10,${0.15 * flickerOpacity})`);
     grad.addColorStop(1, 'rgba(255,0,0,0)');
     ctx.beginPath();
-    ctx.arc(x, y, GLOW_RADIUS, 0, Math.PI * 2);
+    ctx.arc(x, y, currentGlow, 0, Math.PI * 2);
     ctx.fillStyle = grad;
     ctx.fill();
 
-    // Inner dot (18px radius with pulse)
-    const r = DOT_RADIUS + Math.sin(now * 0.02) * 2;
+    // Inner dot (18px radius with pulse) — scaled
+    const r = (DOT_RADIUS + Math.sin(now * 0.02) * 2) * scale;
     ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255,51,34,${opacity})`;
+    ctx.arc(x, y, Math.max(0.5, r), 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,51,34,${flickerOpacity})`;
     ctx.fill();
 
     // Bright center
     ctx.beginPath();
-    ctx.arc(x, y, r * 0.45, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255,170,170,${opacity})`;
+    ctx.arc(x, y, Math.max(0.25, r * 0.45), 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,170,170,${flickerOpacity})`;
     ctx.fill();
   }
+
+  // ─── Touch/click reactive fleeing ───
+  let appStarted = false;
+
+  function handleTouch(ex, ey) {
+    if (!appStarted) return;
+    laser.fleeFrom(ex, ey);
+  }
+
+  canvas.addEventListener('mousedown', function(e) {
+    handleTouch(e.clientX, e.clientY);
+  });
+
+  canvas.addEventListener('touchstart', function(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    if (touch) handleTouch(touch.clientX, touch.clientY);
+  }, { passive: false });
 
   // ─── Start everything on tap/click ───
   function startApp() {
     overlay.style.display = 'none';
+    appStarted = true;
     initAudio();
     initRustleNoise();
     laser.init();
